@@ -218,7 +218,7 @@ else:
 expanded_tasks = expand_resources(display_tasks)
 
 # -----------------------------
-# Resource Settings (compact)
+# Resource Settings (tight layout)
 # -----------------------------
 st.subheader("Resource Capacity Settings")
 
@@ -235,22 +235,31 @@ for i, r in enumerate(resources):
     if r not in st.session_state.resource_cooldown:
         st.session_state.resource_cooldown[r] = 1.0
 
+    # ✅ Resource label (only visible label)
+    col.markdown(f"**{r}**")
+
+    # ✅ Capacity (no extra spacing label)
     st.session_state.resource_caps[r] = col.number_input(
-        f"{r}",
+        label="Capacity",
         min_value=1,
         value=int(st.session_state.resource_caps[r]),
-        key=f"cap_{r}"
+        key=f"cap_{r}",
+        label_visibility="collapsed"
     )
 
-    # ✅ Cooldown directly BELOW capacity (no label header)
+    # ✅ Reduce spacing between inputs
+    col.markdown("<div style='margin-top:-10px'></div>", unsafe_allow_html=True)
+
+    # ✅ Cooldown (tight + no tooltip)
     st.session_state.resource_cooldown[r] = col.number_input(
-        "",
+        label="Cooldown",
         min_value=0.0,
         value=float(st.session_state.resource_cooldown[r]),
         step=0.5,
         key=f"cool_{r}",
-        help="Cooldown weeks"
+        label_visibility="collapsed"
     )
+
 
 # -----------------------------
 # Analyze
