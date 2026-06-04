@@ -255,7 +255,7 @@ for i, r in enumerate(resources):
         label="Cooldown",
         min_value=0.0,
         value=float(st.session_state.resource_cooldown[r]),
-        step=0.5,
+        step=0.4,
         key=f"cool_{r}",
         label_visibility="collapsed"
     )
