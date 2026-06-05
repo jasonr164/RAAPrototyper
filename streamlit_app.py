@@ -119,7 +119,7 @@ def square_wave_step_plot(all_tasks, resource, capacity, x_min, x_max):
 # -----------------------------
 if "all_tasks" not in st.session_state:
     st.session_state.all_tasks = pd.DataFrame(
-        columns=['Title', 'Start date', 'End date', 'Resource', 'Source']
+        columns=['Title', 'Start date', 'End date', 'Source', 'Resource']
     )
 
 if "hide_tasks" not in st.session_state:
@@ -147,7 +147,7 @@ uploaded_files = st.file_uploader(
 # -----------------------------
 if uploaded_files:
     fresh_tasks = pd.DataFrame(
-        columns=['Title', 'Start date', 'End date', 'Resource', 'Source']
+        columns=['Title', 'Start date', 'End date', 'Source', 'Resource']
     )
 
     for i, file in enumerate(uploaded_files):
