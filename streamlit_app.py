@@ -147,7 +147,7 @@ uploaded_files = st.file_uploader(
 # -----------------------------
 if uploaded_files:
     fresh_tasks = pd.DataFrame(
-        columns=['Title', 'Start date', 'End date', 'Resource', 'Source']
+        columns=['Title', 'Start date', 'End date', 'Source', 'Resource']
     )
 
     for i, file in enumerate(uploaded_files):
