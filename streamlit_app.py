@@ -1,331 +1,285 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import re
 import plotly.graph_objects as go
 import plotly.express as px
 
 # -----------------------------
-# Helpers
+# File parsing + SOURCE tagging
 # -----------------------------
-def parse_gantt_file(uploaded_file):
+def extract_source(name, idx):
+    match = re.search(r'\d{4}(\.\d+)?', name)
+    return match.group(0) if match else f"File {idx+1}"
+
+def parse_gantt_file(uploaded_file, idx):
     if uploaded_file.name.endswith('.csv'):
         df = pd.read_csv(uploaded_file)
     else:
         df = pd.read_excel(uploaded_file)
 
-    required_cols = ['Title', 'Start date', 'End date']
-    if not all(col in df.columns for col in required_cols):
-        st.error(f"Missing required columns: {required_cols}")
-        return pd.DataFrame(columns=required_cols)
+    df['Source'] = extract_source(uploaded_file.name, idx)
+    df['Resource'] = df['Title']
 
-    df["Resource"] = df["Title"]
-    return df[['Title', 'Start date', 'End date', 'Resource']]
+    return df[['Title', 'Start date', 'End date', 'Resource', 'Source']]
 
+# -----------------------------
 def excel_date(num):
     return pd.Timestamp('1899-12-30') + pd.to_timedelta(num, unit='D')
 
-# ✅ Expand comma-separated resources
+# -----------------------------
+# Expand multi-resource
+# -----------------------------
 def expand_resources(df):
     rows = []
     for _, r in df.iterrows():
-        resources = [x.strip() for x in str(r["Resource"]).split(",")]
+        resources = [x.strip() for x in str(r['Resource']).split(',')]
         for res in resources:
-            new_row = r.copy()
-            new_row["Resource"] = res
-            rows.append(new_row)
+            new = r.copy()
+            new['Resource'] = res
+            rows.append(new)
     return pd.DataFrame(rows)
 
 # -----------------------------
-# Step Plot (WITH cooldown)
+# Build usage timeline WITH task context
 # -----------------------------
-def square_wave_step_plot(all_tasks, resource, capacity, cooldown, x_min, x_max):
-
-    df = all_tasks[all_tasks['Resource'] == resource]
-
+def build_usage(df, resource):
     events = []
 
-    for _, row in df.iterrows():
-        start = row['Start date']
-        end = row['End date']
-
-        # normal usage
-        events.append((start, 1))
-        events.append((end, -1))
-
-        # cooldown usage (+0.5)
-        cd_end = end + pd.Timedelta(weeks=cooldown)
-        events.append((end, 0.5))
-        events.append((cd_end, -0.5))
+    for _, r in df[df['Resource']==resource].iterrows():
+        events.append((r['Start date'], 1, r['Title']))
+        events.append((r['End date'], -1, r['Title']))
 
     events.sort()
+    active = set()
 
-    times, usage = [], []
-    current = 0
+    timeline = []
+    usage = 0
 
-    for t, delta in events:
+    for t, delta, title in events:
+        timeline.append((t, usage, list(active)))
+
+        if delta == 1:
+            active.add(title)
+        else:
+            active.discard(title)
+
+        usage += delta
+
+        timeline.append((t, usage, list(active)))
+
+    return timeline
+
+# -----------------------------
+# Step Plot (fixed segments)
+# -----------------------------
+def square_wave_step_plot(df, resource, capacity, x0, x1):
+
+    timeline = build_usage(df, resource)
+
+    times, values, labels = [], [], []
+
+    for t,u,tasks in timeline:
         times.append(t)
-        usage.append(current)
-        current += delta
-        times.append(t)
-        usage.append(current)
-
-    if not times:
-        return go.Figure()
-
-    if times[0] > x_min:
-        times.insert(0, x_min)
-        usage.insert(0, 0)
-
-    if times[-1] < x_max:
-        times.append(x_max)
-        usage.append(usage[-1])
-
-    step_df = pd.DataFrame({'time': times, 'usage': usage})
+        values.append(u)
+        labels.append(", ".join(tasks))
 
     fig = go.Figure()
 
-    # Base line
+    # base line
     fig.add_trace(go.Scatter(
-        x=step_df['time'],
-        y=step_df['usage'],
+        x=times,
+        y=values,
         mode='lines',
         line=dict(shape='hv', width=3, color='blue'),
-        name=f"{resource}"
+        customdata=labels,
+        hovertemplate="Usage:%{y}<br>Tasks:%{customdata}"
     ))
 
-    # Conflicts
-    mask = step_df['usage'] > capacity
+    # ✅ isolate ONLY conflict segments
+    for i in range(len(times)-1):
+        if values[i] > capacity:
+            fig.add_trace(go.Scatter(
+                x=[times[i], times[i+1]],
+                y=[values[i], values[i+1]],
+                mode='lines',
+                line=dict(shape='hv', width=4, color='red'),
+                showlegend=False,
+                customdata=[labels[i], labels[i]],
+                hovertemplate="Conflict<br>Usage:%{y}<br>Tasks:%{customdata}"
+            ))
 
-    fig.add_trace(go.Scatter(
-        x=step_df['time'][mask],
-        y=step_df['usage'][mask],
-        mode='lines',
-        line=dict(shape='hv', width=4, color='red'),
-        name='Conflict'
-    ))
-
-    fig.add_hline(y=capacity, line_dash="dash", line_color="red")
-
-    y_max = int(np.ceil(max(step_df['usage'].max(), capacity)))
+    fig.add_hline(y=capacity, line_dash='dash', line_color='red')
 
     fig.update_layout(
-        title=f"{resource}",
-        xaxis=dict(range=[x_min, x_max]),
-        yaxis=dict(
-            tickmode='linear',
-            dtick=1,
-            range=[0, y_max + 1]
-        ),
-        height=320
+        title=resource,
+        xaxis=dict(range=[x0,x1]),
+        yaxis=dict(dtick=1),
+        height=300
     )
 
     return fig
+
+# -----------------------------
+# Conflict extraction
+# -----------------------------
+def extract_conflicts(df, capacity):
+    timeline = build_usage(df, df['Resource'].iloc[0])
+    rows = []
+
+    for t,u,tasks in timeline:
+        if u > capacity:
+            rows.append({
+                "Time": t,
+                "Usage": u,
+                "Tasks": ", ".join(tasks)
+            })
+    return rows
 
 # -----------------------------
 # Session State
 # -----------------------------
 if "all_tasks" not in st.session_state:
     st.session_state.all_tasks = pd.DataFrame(
-        columns=['Title', 'Start date', 'End date', 'Resource']
+        columns=['Title','Start date','End date','Resource','Source']
     )
-
-if "hide_tasks" not in st.session_state:
-    st.session_state.hide_tasks = set()
 
 if "resource_caps" not in st.session_state:
     st.session_state.resource_caps = {}
 
-if "resource_cooldown" not in st.session_state:
-    st.session_state.resource_cooldown = {}
-
-if "hide_step_plots" not in st.session_state:
-    st.session_state.hide_step_plots = set()
-
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Resource Gantt Tool - Version B4")
+st.title("Resource Gantt Tool - Version B5")
 
 uploaded_files = st.file_uploader(
     "Upload files",
-    type=['csv', 'xls', 'xlsx'],
+    type=['csv','xls','xlsx'],
     accept_multiple_files=True
 )
 
-# -----------------------------
-# File Load
-# -----------------------------
 if uploaded_files:
-    new_tasks = pd.DataFrame()
+    new_data = pd.DataFrame()
 
-    for file in uploaded_files:
-        df = parse_gantt_file(file)
-        new_tasks = pd.concat([new_tasks, df])
+    for i,f in enumerate(uploaded_files):
+        df = parse_gantt_file(f,i)
+        new_data = pd.concat([new_data,df])
 
-    for col in ['Start date', 'End date']:
-        if np.issubdtype(new_tasks[col].dtype, np.number):
-            new_tasks[col] = new_tasks[col].apply(excel_date)
+    for col in ['Start date','End date']:
+        if np.issubdtype(new_data[col].dtype,np.number):
+            new_data[col]=new_data[col].apply(excel_date)
         else:
-            new_tasks[col] = pd.to_datetime(new_tasks[col], errors='coerce')
-
-    new_tasks = new_tasks.dropna()
+            new_data[col]=pd.to_datetime(new_data[col])
 
     st.session_state.all_tasks = pd.concat(
-        [st.session_state.all_tasks, new_tasks],
-        ignore_index=True
+        [st.session_state.all_tasks,new_data],ignore_index=True
     )
 
 tasks = st.session_state.all_tasks.copy()
 
 # -----------------------------
-# Task Table (stable editor)
+# Table
 # -----------------------------
 st.subheader("Tasks Loaded")
 
-if not tasks.empty:
+edited = st.data_editor(tasks, use_container_width=True)
 
-    if "edit_buffer" not in st.session_state:
-        st.session_state.edit_buffer = tasks.copy()
-        st.session_state.edit_buffer["Hide"] = False
-
-    edited = st.data_editor(
-        st.session_state.edit_buffer,
-        use_container_width=True,
-        height=400
-    )
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("✅ Apply Changes"):
-            st.session_state.all_tasks = edited.drop(columns=["Hide"])
-            st.session_state.hide_tasks = set(edited[edited["Hide"]].index)
-            st.session_state.edit_buffer = edited.copy()
-
-    with col2:
-        if st.button("↩ Reset"):
-            st.session_state.edit_buffer = tasks.copy()
-            st.session_state.edit_buffer["Hide"] = False
-
-    display_tasks = edited[~edited["Hide"]]
-
-else:
-    display_tasks = tasks
+display_tasks = edited.copy()
 
 # -----------------------------
-# Expand resources for analysis
+# Expand resources
 # -----------------------------
-expanded_tasks = expand_resources(display_tasks)
+expanded = expand_resources(display_tasks)
 
 # -----------------------------
-# Resource Settings (tight layout)
+# Resource capacity
 # -----------------------------
-st.subheader("Resource Capacity Settings")
+resources = sorted(expanded['Resource'].unique())
 
-resources = sorted(expanded_tasks['Resource'].unique())
-
-cols = st.columns(min(3, len(resources)) if resources else 1)
-
-for i, r in enumerate(resources):
-    col = cols[i % len(cols)]
-
+for r in resources:
     if r not in st.session_state.resource_caps:
-        st.session_state.resource_caps[r] = 1
+        st.session_state.resource_caps[r]=1
 
-    if r not in st.session_state.resource_cooldown:
-        st.session_state.resource_cooldown[r] = 1.0
-
-    # ✅ Resource label (only visible label)
-    col.markdown(f"**{r}**")
-
-    # ✅ Capacity (no extra spacing label)
-    st.session_state.resource_caps[r] = col.number_input(
-        label="Capacity",
+    st.session_state.resource_caps[r] = st.number_input(
+        f"{r}",
         min_value=1,
-        value=int(st.session_state.resource_caps[r]),
-        key=f"cap_{r}",
-        label_visibility="collapsed"
+        value=st.session_state.resource_caps[r],
+        key=f"cap_{r}"
     )
-
-    # ✅ Reduce spacing between inputs
-    col.markdown("<div style='margin-top:-10px'></div>", unsafe_allow_html=True)
-
-    # ✅ Cooldown (tight + no tooltip)
-    st.session_state.resource_cooldown[r] = col.number_input(
-        label="Cooldown",
-        min_value=0.0,
-        value=float(st.session_state.resource_cooldown[r]),
-        step=0.4,
-        key=f"cool_{r}",
-        label_visibility="collapsed"
-    )
-
 
 # -----------------------------
 # Analyze
 # -----------------------------
 if st.button("Analyze"):
-    st.session_state.analyzed = True
 
-if st.session_state.get("analyzed", False) and not expanded_tasks.empty:
+    x0 = expanded['Start date'].min()
+    x1 = expanded['End date'].max()
 
     # -----------------------------
-    # Gantt
-    # -----------------------------
-    st.subheader("Combined Gantt Chart")
-
-    resource_order = (
-        expanded_tasks.groupby("Resource")["Start date"]
-        .min()
-        .sort_values()
-        .index.tolist()
-    )
-
-    expanded_tasks["Resource"] = pd.Categorical(
-        expanded_tasks["Resource"],
-        categories=resource_order,
-        ordered=True
-    )
-
-    expanded_tasks = expanded_tasks.sort_values(
-        ["Resource", "Start date"]
-    )
+    st.subheader("Combined Gantt")
 
     fig = px.timeline(
-        expanded_tasks,
+        expanded,
         x_start="Start date",
         x_end="End date",
         y="Resource",
-        color="Resource",
-        hover_data=["Title"]
+        color="Source",
+        hover_data=["Title","Source"]
     )
 
-    fig.update_yaxes(
-        categoryorder="array",
-        categoryarray=resource_order,
-        autorange="reversed"
-    )
+    # ✅ overlay conflict segments
+    for r in resources:
+        df_r = expanded[expanded['Resource']==r]
+
+        timeline = build_usage(df_r, r)
+        cap = st.session_state.resource_caps[r]
+
+        for i in range(len(timeline)-1):
+            t,u,_ = timeline[i]
+            t2 = timeline[i+1][0]
+
+            if u > cap:
+                fig.add_shape(
+                    type="rect",
+                    x0=t, x1=t2,
+                    y0=r, y1=r,
+                    xref='x',
+                    yref='y',
+                    fillcolor="red",
+                    opacity=0.3,
+                    line_width=0
+                )
+
+    fig.update_yaxes(autorange='reversed')
 
     st.plotly_chart(fig, width="stretch")
 
     # -----------------------------
-    # Step Plots
-    # -----------------------------
-    st.subheader("Step Plot Visualizations")
-
-    x0 = expanded_tasks["Start date"].min()
-    x1 = expanded_tasks["End date"].max()
+    st.subheader("Step Plots")
 
     for r in resources:
-        if r not in st.session_state.hide_step_plots:
+        fig = square_wave_step_plot(
+            expanded,
+            r,
+            st.session_state.resource_caps[r],
+            x0,x1
+        )
+        st.plotly_chart(fig, width="stretch")
 
-            fig = square_wave_step_plot(
-                expanded_tasks,
-                r,
-                st.session_state.resource_caps[r],
-                st.session_state.resource_cooldown[r],
-                x0,
-                x1
-            )
+    # -----------------------------
+    st.subheader("Conflict Summary")
 
-            st.plotly_chart(fig, width="stretch")
+    all_conflicts = []
+
+    for r in resources:
+        df_r = expanded[expanded['Resource']==r]
+        rows = extract_conflicts(df_r, st.session_state.resource_caps[r])
+
+        for row in rows:
+            row["Resource"]=r
+            all_conflicts.append(row)
+
+    if all_conflicts:
+        st.dataframe(pd.DataFrame(all_conflicts))
+    else:
+        st.success("No conflicts ✅")
